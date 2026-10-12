@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -20,7 +20,15 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 from backend.app import main  # noqa: E402
 from backend.app.db import get_db  # noqa: E402
 from backend.app.main import app, is_rate_overlap_violation, safe_csv_cell  # noqa: E402
-from backend.app.models import Admin, Airline, Base, FuelRate, Provider  # noqa: E402
+from backend.app.models import (  # noqa: E402
+    Admin,
+    Airline,
+    Base,
+    FuelRate,
+    Invoice,
+    InvoicePayment,
+    Provider,
+)
 from backend.app.schemas import CancelIn, EntityIn, InvoiceIn, LoginIn, RateIn  # noqa: E402
 from backend.app.security import hash_password  # noqa: E402
 
@@ -40,6 +48,13 @@ def test_postgres_rate_overlap_constraint_and_conflict_mapping():
     unrelated = IntegrityError("insert", {}, RuntimeError("other constraint"))
     assert is_rate_overlap_violation(violation)
     assert not is_rate_overlap_violation(unrelated)
+
+
+def test_production_app_does_not_mount_legacy_api_routes():
+    paths = {getattr(route, "path", "") for route in app.routes}
+    assert "/api/providers" not in paths
+    assert "/api/auth/login" not in paths
+    assert "/api/v1/providers" in paths
 
 
 @pytest.fixture
@@ -156,6 +171,10 @@ async def test_authenticated_full_invoice_api_journey(client):
     assert created.json()["reference"] == "=INV-API-001"
     assert created.json()["subtotal"] == "250.00"
     assert created.json()["total_amount"] == "250.00"
+    assert (
+        created.json()["due_date"]
+        == (date.fromisoformat(date_today) + timedelta(days=30)).isoformat()
+    )
     assert (await client.get("/api/v1/invoices?q=INV-API")).json()["total"] == 1
     assert (await client.get(f"/api/v1/invoices/{invoice_id}")).json()["rate_per_unit"] == "2.50000"
     assert "'=INV-API-001" in (await client.get("/api/v1/invoices/export.csv")).text
@@ -228,6 +247,7 @@ async def test_authenticated_full_invoice_api_journey(client):
     assert payment_list.json()["items"][0]["balance_due"] == "150.00"
     payment_export = await client.get("/api/v1/invoices/export.csv", params={"q": "INV-API-001"})
     assert "100.00,150.00,PARTIALLY_PAID" in payment_export.text
+    assert date_today in payment_export.text
     excessive_payment = await client.post(
         f"/api/v1/invoices/{invoice_id}/payments",
         json={"amount": "150.01", "payment_date": date_today},
@@ -257,6 +277,140 @@ async def test_authenticated_full_invoice_api_journey(client):
     assert edit.status_code == 409
     assert (await client.post("/api/v1/auth/logout", headers=headers)).status_code == 200
     assert (await client.get("/api/v1/auth/me")).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_receivables_aging_groups_open_balances_by_due_date_and_currency(client):
+    login = await client.post(
+        "/api/v1/auth/login", json={"username": "operator", "password": "long-test-password"}
+    )
+    assert login.status_code == 200
+    today = date.today()
+
+    async with client.session_factory() as session:
+        admin = await session.scalar(select(Admin).where(Admin.username == "operator"))
+        provider = Provider(code="AGE-FUEL", name="Aging Fuel")
+        airline = Airline(code="AGE-AIR", name="Aging Air")
+        session.add_all([provider, airline])
+        await session.flush()
+        rate = FuelRate(
+            provider_id=provider.id,
+            fuel_type="JET A-1",
+            rate_per_unit=Decimal("1.00000"),
+            currency="USD",
+            effective_from=today - timedelta(days=365),
+            active=True,
+        )
+        session.add(rate)
+        await session.flush()
+        buckets = (
+            ("CURRENT", today, Decimal("100.00"), None),
+            ("DAYS_1_30", today - timedelta(days=1), Decimal("200.00"), Decimal("50.00")),
+            ("DAYS_31_60", today - timedelta(days=31), Decimal("300.00"), None),
+            ("DAYS_61_90", today - timedelta(days=61), Decimal("400.00"), None),
+            ("DAYS_91_PLUS", today - timedelta(days=91), Decimal("500.00"), None),
+        )
+        invoices = []
+        for name, due_date, total, payment_amount in buckets:
+            invoice = Invoice(
+                reference=f"AGING-{name}",
+                airline_id=airline.id,
+                provider_id=provider.id,
+                rate_id=rate.id,
+                airline_code=airline.code,
+                airline_name=airline.name,
+                provider_code=provider.code,
+                provider_name=provider.name,
+                billing_month=today.replace(day=1),
+                invoice_date=due_date - timedelta(days=30),
+                due_date=due_date,
+                fuel_type=rate.fuel_type,
+                quantity=total,
+                rate_per_unit=rate.rate_per_unit,
+                currency="USD",
+                subtotal=total,
+                tax_amount=Decimal("0.00"),
+                total_amount=total,
+                status="FINALIZED",
+            )
+            session.add(invoice)
+            invoices.append((invoice, payment_amount))
+
+        foreign_currency = Invoice(
+            reference="AGING-EUR",
+            airline_id=airline.id,
+            provider_id=provider.id,
+            rate_id=rate.id,
+            airline_code=airline.code,
+            airline_name=airline.name,
+            provider_code=provider.code,
+            provider_name=provider.name,
+            billing_month=today.replace(day=1),
+            invoice_date=today - timedelta(days=130),
+            due_date=today - timedelta(days=100),
+            fuel_type=rate.fuel_type,
+            quantity=Decimal("25.00"),
+            rate_per_unit=rate.rate_per_unit,
+            currency="EUR",
+            subtotal=Decimal("25.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("25.00"),
+            status="FINALIZED",
+        )
+        excluded_draft = Invoice(
+            reference="AGING-DRAFT",
+            airline_id=airline.id,
+            provider_id=provider.id,
+            rate_id=rate.id,
+            airline_code=airline.code,
+            airline_name=airline.name,
+            provider_code=provider.code,
+            provider_name=provider.name,
+            billing_month=today.replace(day=1),
+            invoice_date=today - timedelta(days=130),
+            due_date=today - timedelta(days=100),
+            fuel_type=rate.fuel_type,
+            quantity=Decimal("10.00"),
+            rate_per_unit=rate.rate_per_unit,
+            currency="USD",
+            subtotal=Decimal("10.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("10.00"),
+            status="DRAFT",
+        )
+        session.add_all([foreign_currency, excluded_draft])
+        await session.flush()
+        for invoice, payment_amount in invoices:
+            if payment_amount:
+                session.add(
+                    InvoicePayment(
+                        invoice_id=invoice.id,
+                        admin_id=admin.id,
+                        amount=payment_amount,
+                        payment_date=today,
+                    )
+                )
+        await session.commit()
+
+    dashboard = (await client.get("/api/v1/dashboard")).json()
+    aging = {row["currency"]: row for row in dashboard["receivables_aging"]}
+    assert aging["USD"] == {
+        "currency": "USD",
+        "current": "100.00",
+        "days_1_30": "150.00",
+        "days_31_60": "300.00",
+        "days_61_90": "400.00",
+        "days_91_plus": "500.00",
+        "total_balance": "1450.00",
+        "invoice_count": 5,
+    }
+    assert aging["EUR"]["days_91_plus"] == "25.00"
+    assert aging["EUR"]["total_balance"] == "25.00"
+    assert aging["EUR"]["invoice_count"] == 1
+    async with client.session_factory() as session:
+        admin = await session.scalar(select(Admin).where(Admin.username == "operator"))
+        direct_dashboard = await main.dashboard(12, session, admin)
+    assert direct_dashboard["receivables_aging"] == dashboard["receivables_aging"]
 
 
 @pytest.mark.asyncio
@@ -343,7 +497,7 @@ async def test_master_data_filters_rate_management_and_invoice_lifecycle(client)
     created = await client.post("/api/v1/invoices", json=invoice_data, headers=headers)
     assert created.status_code == 201
     invoice_id = created.json()["id"]
-    immutable_rate = await client.put(
+    updated_rate_after_invoice = await client.put(
         f"/api/v1/rates/{rate_id}",
         json={
             "provider_id": provider_id,
@@ -355,17 +509,63 @@ async def test_master_data_filters_rate_management_and_invoice_lifecycle(client)
         },
         headers=headers,
     )
-    assert immutable_rate.status_code == 409
+    assert updated_rate_after_invoice.status_code == 200
+    assert updated_rate_after_invoice.json()["rate_per_unit"] == "3.30000"
     assert created.json()["total_amount"] == "33.00"
+    unchanged_draft = await client.get(f"/api/v1/invoices/{invoice_id}")
+    assert unchanged_draft.json()["rate_per_unit"] == "3.20000"
+    assert unchanged_draft.json()["total_amount"] == "33.00"
     invoice_data["quantity"] = "20.000"
     updated = await client.put(f"/api/v1/invoices/{invoice_id}", json=invoice_data, headers=headers)
     assert updated.status_code == 200
-    assert updated.json()["total_amount"] == "65.00"
+    assert updated.json()["rate_per_unit"] == "3.30000"
+    assert updated.json()["total_amount"] == "67.00"
     result = await client.get(
         "/api/v1/invoices?airline_id=1&provider_id=1&billing_month=2026-09-25&status=draft&page_size=1"
     )
     assert result.json()["total"] == 1
     assert (await client.get("/api/v1/invoices?status=not-a-status")).json()["total"] == 0
+    updated_rate_before_new_invoice = await client.put(
+        f"/api/v1/rates/{rate_id}",
+        json={
+            "provider_id": provider_id,
+            "fuel_type": "JET A-1",
+            "rate_per_unit": "3.40000",
+            "currency": "USD",
+            "effective_from": "2020-01-01",
+            "active": True,
+        },
+        headers=headers,
+    )
+    assert updated_rate_before_new_invoice.status_code == 200
+    new_invoice = await client.post(
+        "/api/v1/invoices",
+        json={**invoice_data, "reference": "INV-LIFECYCLE-NEW-RATE", "quantity": "10.000"},
+        headers=headers,
+    )
+    assert new_invoice.status_code == 201
+    assert new_invoice.json()["rate_per_unit"] == "3.40000"
+    assert new_invoice.json()["total_amount"] == "35.00"
+    finalized = await client.post(
+        f"/api/v1/invoices/{new_invoice.json()['id']}/finalize", headers=headers
+    )
+    assert finalized.status_code == 200
+    updated_rate_after_finalization = await client.put(
+        f"/api/v1/rates/{rate_id}",
+        json={
+            "provider_id": provider_id,
+            "fuel_type": "JET A-1",
+            "rate_per_unit": "3.50000",
+            "currency": "USD",
+            "effective_from": "2020-01-01",
+            "active": True,
+        },
+        headers=headers,
+    )
+    assert updated_rate_after_finalization.status_code == 200
+    unchanged_finalized = await client.get(f"/api/v1/invoices/{new_invoice.json()['id']}")
+    assert unchanged_finalized.json()["rate_per_unit"] == "3.40000"
+    assert unchanged_finalized.json()["total_amount"] == "35.00"
     cancelled = await client.post(
         f"/api/v1/invoices/{invoice_id}/cancel",
         json={"reason": "Customer requested correction"},
@@ -822,23 +1022,22 @@ async def test_main_rate_overlap_conflicts_and_integrity_errors(client):
             await main.create_rate(payload, create_failure, admin)
         assert create_failure.rollback_count == 1
 
-        referenced = RateFailureDatabase([1])
-        with pytest.raises(HTTPException) as immutable:
-            await main.update_rate(rate.id, payload, referenced, admin)
-        assert immutable.value.status_code == 409
+        referenced = RateFailureDatabase([None])
+        updated_referenced_rate = await main.update_rate(rate.id, payload, referenced, admin)
+        assert updated_referenced_rate.id == rate.id
 
-        update_overlap = RateFailureDatabase([None, 1])
+        update_overlap = RateFailureDatabase([1])
         with pytest.raises(HTTPException) as overlap:
             await main.update_rate(rate.id, payload, update_overlap, admin)
         assert overlap.value.status_code == 409
 
-        update_failure = RateFailureDatabase([None, None], overlap_error)
+        update_failure = RateFailureDatabase([None], overlap_error)
         with pytest.raises(HTTPException) as update_conflict:
             await main.update_rate(rate.id, payload, update_failure, admin)
         assert update_conflict.value.status_code == 409
         assert update_failure.rollback_count == 1
 
-        unrelated_update = RateFailureDatabase([None, None], unrelated_error)
+        unrelated_update = RateFailureDatabase([None], unrelated_error)
         with pytest.raises(IntegrityError):
             await main.update_rate(rate.id, payload, unrelated_update, admin)
         assert unrelated_update.rollback_count == 1

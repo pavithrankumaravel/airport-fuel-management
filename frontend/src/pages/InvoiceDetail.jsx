@@ -100,25 +100,35 @@ export function InvoiceDetail() {
       <ErrorBox error={error} />
       <div className="invoice-paper">
         <div className="invoice-paper-head">
-          <div>
-            <div className="brand-mark small">
-              <i className="bi bi-fuel-pump-fill" />
+          <div className="invoice-brand">
+            <div className="brand-mark small invoice-brand-mark">
+              <i className="bi bi-fuel-pump-fill" aria-hidden="true" />
             </div>
-            <span className="eyebrow">AIRPORT FUEL MANAGEMENT</span>
-            <h2>Fuel invoice</h2>
+            <div>
+              <span className="eyebrow">AIRPORT FUEL MANAGEMENT</span>
+              <h2>Fuel invoice</h2>
+              <small>FUEL OPERATIONS</small>
+            </div>
           </div>
-          <span className={`state state-${row.status.toLowerCase()}`}>
-            {pretty(row.status)}
-          </span>
+          <div className="invoice-status-block">
+            <span className="invoice-doc-label">INVOICE</span>
+            <span className={`state state-${row.status.toLowerCase()}`}>
+              {pretty(row.status)}
+            </span>
+          </div>
         </div>
         <div className="invoice-meta">
           <div>
-            <span>INVOICE REFERENCE</span>
+            <span>INVOICE NUMBER</span>
             <b>{row.reference}</b>
           </div>
           <div>
             <span>INVOICE DATE</span>
             <b>{row.invoice_date}</b>
+          </div>
+          <div>
+            <span>PAYMENT DUE DATE</span>
+            <b>{row.due_date}</b>
           </div>
           <div>
             <span>BILLING PERIOD</span>
@@ -131,15 +141,15 @@ export function InvoiceDetail() {
           </div>
         </div>
         <div className="invoice-parties">
-          <div>
-            <span>BILLED TO AIRLINE</span>
+          <div className="invoice-party-card">
+            <span className="invoice-party-label">BILLED TO</span>
             <b>{row.airline_name}</b>
-            <small>{row.airline_code}</small>
+            <small>{row.airline_code} · Airline</small>
           </div>
-          <div>
-            <span>FUEL PROVIDER</span>
+          <div className="invoice-party-card">
+            <span className="invoice-party-label">FUEL SUPPLIER</span>
             <b>{row.provider_name}</b>
-            <small>{row.provider_code}</small>
+            <small>{row.provider_code} · Fuel provider</small>
           </div>
         </div>
         <div className="table-responsive">
@@ -173,26 +183,47 @@ export function InvoiceDetail() {
             </tbody>
           </table>
         </div>
-        <div className="invoice-total">
-          <div>
-            <span>Subtotal</span>
-            <b>{currency(row.subtotal, row.currency)}</b>
+        <div className="invoice-bottom-grid">
+          <div className="invoice-payment-summary">
+            <div className="invoice-summary-top">
+              <div className="invoice-summary-icon">
+                <i className="bi bi-wallet2" aria-hidden="true" />
+              </div>
+              <div className="invoice-summary-copy">
+                <span className="invoice-summary-label">PAYMENT STATUS</span>
+                <strong
+                  className={`invoice-paystate invoice-paystate-${row.payment_status.toLowerCase()}`}
+                >
+                  {pretty(row.payment_status)}
+                </strong>
+              </div>
+            </div>
+            <div className="invoice-due-detail">
+              <span>Payment due by</span>
+              <b>{row.due_date}</b>
+            </div>
           </div>
-          <div>
-            <span>Tax</span>
-            <b>{currency(row.tax_amount, row.currency)}</b>
-          </div>
-          <div className="grand-total">
-            <span>Total due</span>
-            <b>{currency(row.total_amount, row.currency)}</b>
-          </div>
-          <div>
-            <span>Payments received</span>
-            <b>{currency(row.paid_amount, row.currency)}</b>
-          </div>
-          <div className="grand-total">
-            <span>Outstanding balance</span>
-            <b>{currency(row.balance_due, row.currency)}</b>
+          <div className="invoice-total">
+            <div>
+              <span>Subtotal</span>
+              <b>{currency(row.subtotal, row.currency)}</b>
+            </div>
+            <div>
+              <span>Tax</span>
+              <b>{currency(row.tax_amount, row.currency)}</b>
+            </div>
+            <div className="grand-total invoice-total-due">
+              <span>Invoice total</span>
+              <b>{currency(row.total_amount, row.currency)}</b>
+            </div>
+            <div>
+              <span>Payments received</span>
+              <b>{currency(row.paid_amount, row.currency)}</b>
+            </div>
+            <div className="grand-total invoice-balance">
+              <span>Outstanding balance</span>
+              <b>{currency(row.balance_due, row.currency)}</b>
+            </div>
           </div>
         </div>
         <section
@@ -304,6 +335,10 @@ export function InvoiceDetail() {
             Cancellation reason: {row.cancel_reason}
           </div>
         )}
+        <div className="invoice-print-footer">
+          <span>Airport Fuel Management</span>
+          <span>{row.reference}</span>
+        </div>
         {row.status === "DRAFT" && (
           <div className="invoice-actions no-print">
             <button

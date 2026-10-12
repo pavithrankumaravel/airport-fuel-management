@@ -97,9 +97,11 @@ class Invoice(Base):
         CheckConstraint(
             "subtotal >= 0 AND tax_amount >= 0 AND total_amount >= 0", name="ck_invoice_amounts"
         ),
+        CheckConstraint("due_date >= invoice_date", name="ck_invoice_due_date_after_invoice_date"),
         UniqueConstraint("reference", name="uq_invoice_reference"),
         Index("ix_invoice_billing_month", "billing_month"),
         Index("ix_invoice_status_date", "status", "invoice_date"),
+        Index("ix_invoice_status_due_date", "status", "due_date"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     reference: Mapped[str] = mapped_column(String(40))
@@ -109,13 +111,17 @@ class Invoice(Base):
     provider_id: Mapped[int] = mapped_column(
         ForeignKey("providers.id", ondelete="RESTRICT"), index=True
     )
-    rate_id: Mapped[int] = mapped_column(ForeignKey("fuel_rates.id", ondelete="RESTRICT"))
+    # Invoices retain their saved rate and amounts even when the source rate is deleted.
+    rate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("fuel_rates.id", ondelete="SET NULL"), nullable=True
+    )
     airline_code: Mapped[str] = mapped_column(String(24))
     airline_name: Mapped[str] = mapped_column(String(160))
     provider_code: Mapped[str] = mapped_column(String(24))
     provider_name: Mapped[str] = mapped_column(String(160))
     billing_month: Mapped[date] = mapped_column(Date)
     invoice_date: Mapped[date] = mapped_column(Date)
+    due_date: Mapped[date] = mapped_column(Date)
     fuel_type: Mapped[str] = mapped_column(String(40))
     quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3))
     rate_per_unit: Mapped[Decimal] = mapped_column(Numeric(14, 5))

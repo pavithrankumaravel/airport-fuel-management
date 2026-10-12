@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
+import { useLatestRequest } from "../useLatestRequest";
 import { Empty, ErrorBox, Loading, PageHeading } from "../components/UI";
 import { currency } from "../utils";
 
@@ -12,32 +13,56 @@ export function Rates() {
     [providerFilter, setProviderFilter] = useState(""),
     [fuelFilter, setFuelFilter] = useState(""),
     [effectiveOn, setEffectiveOn] = useState("");
+  const runLatestRateRequest = useLatestRequest();
+  const runLatestOptionsRequest = useLatestRequest();
   const load = useCallback(
     () =>
-      api
-        .get("/rates", {
-          params: {
-            page_size: 100,
-            provider_id: providerFilter || undefined,
-            fuel_type: fuelFilter || undefined,
-            effective_on: effectiveOn || undefined,
-          },
-        })
-        .then((r) => setData(r.data))
-        .catch((e) => setError(errorMessage(e))),
-    [providerFilter, fuelFilter, effectiveOn],
+      runLatestRateRequest(async (signal) => {
+        try {
+          const r = await api.get("/rates", {
+            params: {
+              page_size: 100,
+              provider_id: providerFilter || undefined,
+              fuel_type: fuelFilter || undefined,
+              effective_on: effectiveOn || undefined,
+            },
+            signal,
+          });
+          if (!signal.aborted) {
+            setData(r.data);
+            setError("");
+          }
+        } catch (e) {
+          if (!signal.aborted) setError(errorMessage(e));
+        }
+      }),
+    [providerFilter, fuelFilter, effectiveOn, runLatestRateRequest],
   );
   useEffect(() => {
     load();
-    api
-      .get("/config")
-      .then((r) => setDefaultCurrency(r.data.default_currency))
-      .catch((e) => setError(errorMessage(e)));
-    api
-      .get("/providers", { params: { page_size: 100 } })
-      .then((r) => setProviders(r.data.items))
-      .catch((e) => setError(errorMessage(e)));
   }, [load]);
+  useEffect(() => {
+    runLatestOptionsRequest((signal) =>
+      Promise.all([
+        api
+          .get("/config", { signal })
+          .then((r) => {
+            if (!signal.aborted) setDefaultCurrency(r.data.default_currency);
+          })
+          .catch((e) => {
+            if (!signal.aborted) setError(errorMessage(e));
+          }),
+        api
+          .get("/providers", { params: { page_size: 100 }, signal })
+          .then((r) => {
+            if (!signal.aborted) setProviders(r.data.items);
+          })
+          .catch((e) => {
+            if (!signal.aborted) setError(errorMessage(e));
+          }),
+      ]),
+    );
+  }, [runLatestOptionsRequest]);
   async function submit(e) {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.currentTarget));
@@ -62,6 +87,22 @@ export function Rates() {
       return;
     try {
       await api.delete(`/rates/${rate.id}`);
+      if (edit?.id === rate.id) setEdit(null);
+      load();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+  async function deleteRate(rate) {
+    if (
+      !window.confirm(
+        "Permanently delete this rate? Existing invoices will keep their saved rate and totals.",
+      )
+    )
+      return;
+    try {
+      await api.delete(`/rates/${rate.id}/permanent`);
+      setEdit(null);
       load();
     } catch (err) {
       setError(errorMessage(err));
@@ -73,7 +114,7 @@ export function Rates() {
       <PageHeading
         eyebrow="RATE MANAGEMENT"
         title="Fuel rates"
-        subtitle="Time-bound rates are selected by provider, fuel type and invoice date."
+        subtitle="Edit rates at any time; existing invoices keep their saved rate and totals."
         action={
           <button onClick={() => setEdit({})} className="btn btn-primary">
             <i className="bi bi-plus-lg me-2" />
@@ -182,6 +223,16 @@ export function Rates() {
               </label>
             )}
             <div className="wide form-actions">
+              {edit.id && (
+                <button
+                  type="button"
+                  className="btn btn-outline-danger me-auto"
+                  onClick={() => deleteRate(edit)}
+                >
+                  <i className="bi bi-trash me-2" />
+                  Delete rate
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-light"
